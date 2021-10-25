@@ -41,6 +41,12 @@ class Wav2vecCriterion(FairseqCriterion):
         self.loss_weights = loss_weights
         self.log_keys = [] if log_keys is None else log_keys
 
+    def off_diagonal(x):
+        # return a flattened view of the off-diagonal elements of a square matrix
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
+
     def forward(self, model, sample, reduce=True):
         """Compute the loss for the given sample.
 
@@ -50,8 +56,10 @@ class Wav2vecCriterion(FairseqCriterion):
         3) logging outputs to display while training
         """
         net_output = model(**sample["net_input"])
-        logits = model.get_logits(net_output).float()
-        target = model.get_targets(sample, net_output)
+        # logits = model.get_logits(net_output).float()
+        # target = model.get_targets(sample, net_output)
+        logits = net_output["x"]
+        target = net_output["y"]
         self.xla = is_xla_tensor(logits)
 
         # XXX: handle weights on xla.
@@ -64,12 +72,25 @@ class Wav2vecCriterion(FairseqCriterion):
         losses = []
 
         reduction = "none" if ((not reduce) or self.xla) else "sum"
-        if self.infonce:
-            loss = F.cross_entropy(logits, target, reduction=reduction)
-        else:
-            loss = F.binary_cross_entropy_with_logits(
-                logits, target.float(), weights, reduction=reduction
-            )
+
+        x = x.view(-1, x.shape[2]) #new x
+        y = y.view(-1, y.shape[2]) #new y
+
+        c = self.bn(x).T @ self.bn(y)
+        torch.distributed.all_reduce(c)
+        c.div_(x.shape[0])
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = self.off_diagonal(c).pow_(2).sum()
+
+        loss = on_diag + 0.0051 * off_diag
+
+        # if self.infonce:
+        #     loss = F.cross_entropy(logits, target, reduction=reduction)
+        # else:
+        #     loss = F.binary_cross_entropy_with_logits(
+        #         logits, target.float(), weights, reduction=reduction
+        #     )
 
         if self.xla:
             # tpu-comment: since dynamic shapes lead to recompilations on xla,
@@ -88,23 +109,24 @@ class Wav2vecCriterion(FairseqCriterion):
             sample_size = sample['net_input']['mask_indices'].sum()
         else:
             sample_size = target.numel() if self.infonce else target.long().sum().item()
+        
         losses.append(loss.detach().clone())
 
-        if self.loss_weights is not None:
-            assert hasattr(model, "get_extra_losses")
-            extra_losses = model.get_extra_losses(net_output)
-            if torch.is_tensor(extra_losses):
-                extra_losses = [extra_losses]
-            if len(self.loss_weights) == 1 and len(extra_losses) != 1:
-                self.loss_weights = [self.loss_weights[0]] * len(extra_losses)
-            assert len(extra_losses) == len(
-                self.loss_weights
-            ), f"{len(extra_losses)}, {len(self.loss_weights)}"
-            for p, coef in zip(extra_losses, self.loss_weights):
-                if coef != 0 and p is not None:
-                    p = coef * p.float() * sample_size
-                    loss += p
-                    losses.append(p)
+        # if self.loss_weights is not None:
+        #     assert hasattr(model, "get_extra_losses")
+        #     extra_losses = model.get_extra_losses(net_output)
+        #     if torch.is_tensor(extra_losses):
+        #         extra_losses = [extra_losses]
+        #     if len(self.loss_weights) == 1 and len(extra_losses) != 1:
+        #         self.loss_weights = [self.loss_weights[0]] * len(extra_losses)
+        #     assert len(extra_losses) == len(
+        #         self.loss_weights
+        #     ), f"{len(extra_losses)}, {len(self.loss_weights)}"
+        #     for p, coef in zip(extra_losses, self.loss_weights):
+        #         if coef != 0 and p is not None:
+        #             p = coef * p.float() * sample_size
+        #             loss += p
+        #             losses.append(p)
 
         logging_output = {
             "loss": loss.item() if (reduce and not self.xla) else loss.detach(),
@@ -113,52 +135,52 @@ class Wav2vecCriterion(FairseqCriterion):
             "sample_size": sample_size,
         }
 
-        for lk in self.log_keys:
-            # Only store "logits" and "target" for computing MAP and MAUC
-            # during validation
-            if lk == "logits":
-                if not self.training:
-                    logging_output["logits"] = logits.cpu().numpy()
-            elif lk == "target":
-                if not self.training:
-                    # If the targets have been mixed with the predictions of
-                    # teacher models, find the original targets
-                    if hasattr(model, "get_original_targets"):
-                        original_target = model.get_original_targets(sample, net_output)
-                    else:
-                        original_target = target
-                    logging_output["target"] = original_target.cpu().numpy()
-            elif lk in net_output:
-                value = net_output[lk]
-                if not is_xla_tensor(value):
-                    value = float(value)
-                logging_output[lk] = value
+        # for lk in self.log_keys:
+        #     # Only store "logits" and "target" for computing MAP and MAUC
+        #     # during validation
+        #     if lk == "logits":
+        #         if not self.training:
+        #             logging_output["logits"] = logits.cpu().numpy()
+        #     elif lk == "target":
+        #         if not self.training:
+        #             # If the targets have been mixed with the predictions of
+        #             # teacher models, find the original targets
+        #             if hasattr(model, "get_original_targets"):
+        #                 original_target = model.get_original_targets(sample, net_output)
+        #             else:
+        #                 original_target = target
+        #             logging_output["target"] = original_target.cpu().numpy()
+        #     elif lk in net_output:
+        #         value = net_output[lk]
+        #         if not is_xla_tensor(value):
+        #             value = float(value)
+        #         logging_output[lk] = value
 
         if len(losses) > 1:
             for i, l in enumerate(losses):
                 logging_output[f"loss_{i}"] = l.item() if not self.xla else l.detach()
 
-        if self.infonce:
-            with torch.no_grad():
-                if logits.numel() == 0:
-                    corr = 0
-                    count = 0
-                else:
-                    assert logits.dim() > 1, logits.shape
-                    max = logits.argmax(-1) == 0
-                    min = logits.argmin(-1) == 0
-                    if is_xla_tensor(logits):
-                        max, min = max * mi, min * mi
-                        both = max & min
-                        corr = max.long().sum() - both.long().sum()
-                        count = mi.sum()
-                    else:
-                        both = max & min
-                        corr = max.long().sum().item() - both.long().sum().item()
-                        count = float(max.numel())
+        # if self.infonce:
+        #     with torch.no_grad():
+        #         if logits.numel() == 0:
+        #             corr = 0
+        #             count = 0
+        #         else:
+        #             assert logits.dim() > 1, logits.shape
+        #             max = logits.argmax(-1) == 0
+        #             min = logits.argmin(-1) == 0
+        #             if is_xla_tensor(logits):
+        #                 max, min = max * mi, min * mi
+        #                 both = max & min
+        #                 corr = max.long().sum() - both.long().sum()
+        #                 count = mi.sum()
+        #             else:
+        #                 both = max & min
+        #                 corr = max.long().sum().item() - both.long().sum().item()
+        #                 count = float(max.numel())
 
-                logging_output["correct"] = corr
-                logging_output["count"] = count
+        #         logging_output["correct"] = corr
+        #         logging_output["count"] = count
 
         return loss, sample_size, logging_output
 

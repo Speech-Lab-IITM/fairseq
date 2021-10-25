@@ -619,49 +619,49 @@ class Wav2Vec2Model(BaseFairseqModel):
 
             y = self.project_q(y)
 
-            # if self.negatives_from_everywhere:
-            #     neg_cands = self.quantizer(unmasked_features, produce_targets=False)[
-            #         "x"
-            #     ]
-            #     negs, _ = self.sample_negatives(
-            #         neg_cands,
-            #         y.size(1),
-            #         padding_count=padding_count,
-            #     )
-            #     negs = self.project_q(negs)
+            if self.negatives_from_everywhere:
+                neg_cands = self.quantizer(unmasked_features, produce_targets=False)[
+                    "x"
+                ]
+                negs, _ = self.sample_negatives(
+                    neg_cands,
+                    y.size(1),
+                    padding_count=padding_count,
+                )
+                negs = self.project_q(negs)
 
-            # else:
-            #     negs, _ = self.sample_negatives(
-            #         y,
-            #         y.size(1),
-            #         padding_count=padding_count,
-            #     )
+            else:
+                negs, _ = self.sample_negatives(
+                    y,
+                    y.size(1),
+                    padding_count=padding_count,
+                )
 
-            # if self.codebook_negatives > 0:
-            #     cb_negs = self.quantizer.sample_from_codebook(
-            #         y.size(0) * y.size(1), self.codebook_negatives
-            #     )
-            #     cb_negs = cb_negs.view(
-            #         self.codebook_negatives, y.size(0), y.size(1), -1
-            #     )  # order doesnt matter
-            #     cb_negs = self.project_q(cb_negs)
-            #     negs = torch.cat([negs, cb_negs], dim=0)
+            if self.codebook_negatives > 0:
+                cb_negs = self.quantizer.sample_from_codebook(
+                    y.size(0) * y.size(1), self.codebook_negatives
+                )
+                cb_negs = cb_negs.view(
+                    self.codebook_negatives, y.size(0), y.size(1), -1
+                )  # order doesnt matter
+                cb_negs = self.project_q(cb_negs)
+                negs = torch.cat([negs, cb_negs], dim=0)
         else:
             y = self.project_q(y)
 
-            # if self.negatives_from_everywhere:
-            #     negs, _ = self.sample_negatives(
-            #         unmasked_features,
-            #         y.size(1),
-            #         padding_count=padding_count,
-            #     )
-            #     negs = self.project_q(negs)
-            # else:
-            #     negs, _ = self.sample_negatives(
-            #         y,
-            #         y.size(1),
-            #         padding_count=padding_count,
-            #     )
+            if self.negatives_from_everywhere:
+                negs, _ = self.sample_negatives(
+                    unmasked_features,
+                    y.size(1),
+                    padding_count=padding_count,
+                )
+                negs = self.project_q(negs)
+            else:
+                negs, _ = self.sample_negatives(
+                    y,
+                    y.size(1),
+                    padding_count=padding_count,
+                )
 
         if not is_xla_tensor(x):
             # tpu-comment: reducing the size in a dynamic way causes
@@ -670,14 +670,13 @@ class Wav2Vec2Model(BaseFairseqModel):
 
         if self.target_glu:
             y = self.target_glu(y)
-            # negs = self.target_glu(negs)
+            negs = self.target_glu(negs)
 
         x = self.final_proj(x)
-        # x = self.compute_preds(x, y, negs)
+        x = self.compute_preds(x, y, negs)
 
         result = {
             "x": x,
-            "y": y,
             "padding_mask": padding_mask,
             "features_pen": features_pen,
         }
