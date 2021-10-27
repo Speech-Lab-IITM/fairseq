@@ -27,7 +27,9 @@ from fairseq.modules import (
 )
 from fairseq.modules.transformer_sentence_encoder import init_bert_params
 from fairseq.utils import buffered_arange, index_put, is_xla_tensor
-
+import sys
+import math
+import copy
 
 EXTRACTOR_MODE_CHOICES = ChoiceEnum(["default", "layer_norm"])
 MASKING_DISTRIBUTION_CHOICES = ChoiceEnum(["static", "uniform", "normal", "poisson"])
@@ -683,13 +685,31 @@ class Wav2Vec2Model(BaseFairseqModel):
         y = y.view(-1, y.shape[2]) #new y
 
         c = self.bn(x_2).T @ self.bn(y)
+        c.div_(batch*8)
         torch.distributed.all_reduce(c)
-        c.div_(batch)
+        #print("Loss Matrix: ", torch.diagonal(c))
+        #D = c.clone.detach()
+        #OD = c.clone.detach()
+
+        f = open('/nlsasfs/home/nltm-pilot/vasistal/Mjayexpts/fairseq/examples/wav2vec/diag_loss_matrix.txt', 'w')
+        f.write(str(torch.diagonal(c)))
+        f.close()
+        f = open('/nlsasfs/home/nltm-pilot/vasistal/Mjayexpts/fairseq/examples/wav2vec/off_diag_loss_matrix.txt', 'w')
+        f.write(str(c))
+        f.close()
 
         on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
         off_diag = self.off_diagonal(c).pow_(2).sum()
         loss = on_diag + 0.0051 * off_diag
-
+        print("Barlow Loss: ", loss)
+        print("On Diag: ", on_diag)
+        print("Off Diag: ", off_diag)
+        if torch.isinf(on_diag):
+            sys.exit('Diagonal loss was inf')
+        
+        if torch.isinf(0.0051 * off_diag):
+            sys.exit('Off Diagonal loss was inf')
+        
         result = {
             "x": x,
             "y": y,
