@@ -282,6 +282,8 @@ class Wav2Vec2Model(BaseFairseqModel):
 
         self.logit_temp = cfg.logit_temp
 
+        self.bn = nn.BatchNorm1d(768, affine=False)
+
         final_dim = cfg.final_dim if cfg.final_dim > 0 else cfg.encoder_embed_dim
 
         if cfg.quantize_targets:
@@ -675,12 +677,26 @@ class Wav2Vec2Model(BaseFairseqModel):
         x = self.final_proj(x)
         # x = self.compute_preds(x, y, negs)
 
+        batch = x.shape[0]
+
+        x_2 = x.view(-1, x.shape[2]) #new x
+        y = y.view(-1, y.shape[2]) #new y
+
+        c = self.bn(x_2).T @ self.bn(y)
+        torch.distributed.all_reduce(c)
+        c.div_(batch)
+
+        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
+        off_diag = self.off_diagonal(c).pow_(2).sum()
+        loss = on_diag + 0.0051 * off_diag
+
         result = {
             "x": x,
             "y": y,
             "padding_mask": padding_mask,
             "features_pen": features_pen,
-        }
+            "barlow_loss": loss
+            }
 
         if prob_ppl is not None:
             result["prob_perplexity"] = prob_ppl
@@ -689,6 +705,12 @@ class Wav2Vec2Model(BaseFairseqModel):
             result["temp"] = curr_temp
 
         return result
+
+    def off_diagonal(self, x):
+        # return a flattened view of the off-diagonal elements of a square matrix
+        n, m = x.shape
+        assert n == m
+        return x.flatten()[:-1].view(n - 1, n + 1)[:, 1:].flatten()
 
     def quantize(self, x):
         assert self.quantizer is not None

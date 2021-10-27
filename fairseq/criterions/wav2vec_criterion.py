@@ -57,10 +57,9 @@ class Wav2vecCriterion(FairseqCriterion):
         """
         net_output = model(**sample["net_input"])
         # logits = model.get_logits(net_output).float()
-        # target = model.get_targets(sample, net_output)
-        logits = net_output["x"]
-        target = net_output["y"]
-        self.xla = is_xla_tensor(logits)
+        target = model.get_targets(sample, net_output)
+        # self.xla = is_xla_tensor(logits)
+        loss = net_output["barlow_loss"]
 
         # XXX: handle weights on xla.
         weights = None
@@ -71,19 +70,7 @@ class Wav2vecCriterion(FairseqCriterion):
 
         losses = []
 
-        reduction = "none" if ((not reduce) or self.xla) else "sum"
-
-        x = x.view(-1, x.shape[2]) #new x
-        y = y.view(-1, y.shape[2]) #new y
-
-        c = self.bn(x).T @ self.bn(y)
-        torch.distributed.all_reduce(c)
-        c.div_(x.shape[0])
-
-        on_diag = torch.diagonal(c).add_(-1).pow_(2).sum()
-        off_diag = self.off_diagonal(c).pow_(2).sum()
-
-        loss = on_diag + 0.0051 * off_diag
+        #reduction = "none" if ((not reduce) or self.xla) else "sum"
 
         # if self.infonce:
         #     loss = F.cross_entropy(logits, target, reduction=reduction)
@@ -92,16 +79,16 @@ class Wav2vecCriterion(FairseqCriterion):
         #         logits, target.float(), weights, reduction=reduction
         #     )
 
-        if self.xla:
-            # tpu-comment: since dynamic shapes lead to recompilations on xla,
-            # we don't shrink tensors using mask_indices.
-            # Instead, we use mask indices to adjust loss.
-            mi = (
-                sample['net_input']['mask_indices']
-                .transpose(0, 1)  # logits are transposed in `model.get_logits`
-                .reshape(logits.size(0))
-            )
-            loss = (loss * mi).sum() if reduce else (loss * mi)
+        # if self.xla:
+        #     # tpu-comment: since dynamic shapes lead to recompilations on xla,
+        #     # we don't shrink tensors using mask_indices.
+        #     # Instead, we use mask indices to adjust loss.
+        #     mi = (
+        #         sample['net_input']['mask_indices']
+        #         .transpose(0, 1)  # logits are transposed in `model.get_logits`
+        #         .reshape(logits.size(0))
+        #     )
+        #     loss = (loss * mi).sum() if reduce else (loss * mi)
 
         if 'sample_size' in sample:
             sample_size = sample['sample_size']
@@ -129,7 +116,7 @@ class Wav2vecCriterion(FairseqCriterion):
         #             losses.append(p)
 
         logging_output = {
-            "loss": loss.item() if (reduce and not self.xla) else loss.detach(),
+            "loss": loss.item(), #if (reduce and not self.xla) else loss.detach(),
             "ntokens": sample_size,
             "nsentences": sample["id"].numel(),
             "sample_size": sample_size,
@@ -158,7 +145,7 @@ class Wav2vecCriterion(FairseqCriterion):
 
         if len(losses) > 1:
             for i, l in enumerate(losses):
-                logging_output[f"loss_{i}"] = l.item() if not self.xla else l.detach()
+                logging_output[f"loss_{i}"] = l.item() # if not self.xla else l.detach()
 
         # if self.infonce:
         #     with torch.no_grad():
@@ -248,4 +235,5 @@ class Wav2vecCriterion(FairseqCriterion):
         """
         # XXX: Gather based reduction not implemented for xla yet.
         # So we fall to sum based reduction for xla.
-        return self.xla
+        #return self.xla
+        return False
