@@ -183,8 +183,9 @@ class Wav2vecCriterion(FairseqCriterion):
             sum(log.get("sample_size", 0) for log in logging_outputs)
         )
 
+        # "loss", loss_sum / (sample_size or 1) / math.log(2), sample_size, round=3
         metrics.log_scalar(
-            "loss", loss_sum / (sample_size or 1) / math.log(2), sample_size, round=3
+            "loss", loss_sum / len(logging_outputs), sample_size, round=3
         )
         metrics.log_scalar("ntokens", ntokens)
         metrics.log_scalar("nsentences", nsentences)
