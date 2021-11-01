@@ -20,6 +20,9 @@ from omegaconf import DictConfig
 
 logger = logging.getLogger(__name__)
 
+def set_bn_training(m):
+    if isinstance(m, torch.nn.BatchNorm1d):
+        m.train()
 
 class StatefulContainer(object):
 
@@ -498,6 +501,7 @@ class FairseqTask(object):
 
     def valid_step(self, sample, model, criterion):
         model.eval()
+        model.apply(set_bn_training)
         with torch.no_grad():
             loss, sample_size, logging_output = criterion(model, sample)
         return loss, sample_size, logging_output
